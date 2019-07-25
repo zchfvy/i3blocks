@@ -19,6 +19,7 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <dirent.h>
 
 #include "config.h"
 #include "ini.h"
@@ -142,28 +143,49 @@ static int config_open(struct config *conf, const char *path)
 	err = config_read(conf, fd);
 	sys_close(fd);
 
-	if (conf->global)
-		map_destroy(conf->global);
-
 	return err;
 }
 
-int config_load(const char *path, config_cb_t *cb, void *data)
+static int cb_dirent_filter(const struct dirent *info)
+{
+	if (info->d_type != DT_REG)
+		return 0;
+}
+
+static int config_multi_load(struct config *conf, const char *dir)
+{
+	struct dirent **namelist;
+	int n;
+	char buf[PATH_MAX];
+	int err;
+
+	n = scandir(dir, &namelist, cb_dirent_filter, alphasort);
+	if (n < 0)
+		return 1; // TODO - better handlign of this error
+	else {
+		for (int i = 0; i < n; i++) {
+			snprintf(buf, sizeof(buf), "%s/%s", dir, namelist[i]->d_name);
+			debug("loading multiconfig file %s", buf);
+			free(namelist[i]);
+			err = config_open(conf, buf);
+		}
+		free(namelist);
+	}
+	return err;
+}
+
+int config_load_impl(const char *path, struct config *conf)
 {
 	const char * const home = sys_getenv("HOME");
 	const char * const xdg_home = sys_getenv("XDG_CONFIG_HOME");
 	const char * const xdg_dirs = sys_getenv("XDG_CONFIG_DIRS");
-	struct config conf = {
-		.data = data,
-		.cb = cb,
-	};
 	char buf[PATH_MAX];
 	int err;
 
 
 	/* command line config file? */
 	if (path)
-		return config_open(&conf, path);
+		return config_open(conf, path);
 
 	/* user config file? */
 	if (home) {
@@ -171,12 +193,17 @@ int config_load(const char *path, config_cb_t *cb, void *data)
 			snprintf(buf, sizeof(buf), "%s/i3blocks/config", xdg_home);
 		else
 			snprintf(buf, sizeof(buf), "%s/.config/i3blocks/config", home);
-		err = config_open(&conf, buf);
+		err = config_open(conf, buf);
 		if (err != -ENOENT)
 			return err;
 
 		snprintf(buf, sizeof(buf), "%s/.i3blocks.conf", home);
-		err = config_open(&conf, buf);
+		err = config_open(conf, buf);
+		if (err != -ENOENT)
+			return err;
+
+		snprintf(buf, sizeof(buf), "%s/.i3blocks.conf.d", home);
+		err = config_multi_load(conf, buf);
 		if (err != -ENOENT)
 			return err;
 	}
@@ -186,10 +213,24 @@ int config_load(const char *path, config_cb_t *cb, void *data)
 		snprintf(buf, sizeof(buf), "%s/i3blocks/config", xdg_dirs);
 	else
 		snprintf(buf, sizeof(buf), "%s/xdg/i3blocks/config", SYSCONFDIR);
-	err = config_open(&conf, buf);
+	err = config_open(conf, buf);
 	if (err != -ENOENT)
 		return err;
 
 	snprintf(buf, sizeof(buf), "%s/i3blocks.conf", SYSCONFDIR);
-	return config_open(&conf, buf);
+	return config_open(conf, buf);
+}
+
+int config_load(const char *path, config_cb_t *cb, void *data)
+{
+	struct config conf = {
+		.data = data,
+		.cb = cb,
+	};
+	int res = config_load_impl(path, &conf);
+
+	if (conf.global)
+		map_destroy(conf.global);
+
+	return res;
 }
